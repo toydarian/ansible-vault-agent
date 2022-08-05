@@ -11,6 +11,7 @@ SOCKET_NOT_FOUND = 2
 AGENT_ISSUE = 3
 DEFAULT_SOCKET_PATH = f"{str(Path.home())}/.vault-agent.sock"
 CONFIG_LOCATION = "./vault-agent-client.ini"
+BECOME_PASS_ID = "__become_pass"
 
 fmt = logging.Formatter("[%(levelname)s] %(message)s")
 logger = logging.getLogger("vault-agent")
@@ -33,10 +34,10 @@ def is_socket(socket_path: str) -> None:
 
 
 def get_secret(arguments: argparse.Namespace) -> None:
-    get_secret_ansible(arguments.socket, arguments.vault_id)
+    _get_secret(arguments.socket, arguments.vault_id)
 
 
-def get_secret_ansible(socket_path: str, vault_id: str) -> None:
+def _get_secret(socket_path: str, vault_id: str) -> None:
     s = create_connection(PosixPath(socket_path).expanduser())
     s.send(b"GET " + vault_id.encode("utf-8"))
     answer = s.recv(4096).decode("utf-8")
@@ -49,6 +50,10 @@ def get_secret_ansible(socket_path: str, vault_id: str) -> None:
         s.close()
         sys.exit(AGENT_ISSUE)
     s.close()
+
+
+def get_become_pass(arguments: argparse.Namespace) -> None:
+    _get_secret(arguments.socket, BECOME_PASS_ID)
 
 
 def put_secret(arguments: argparse.Namespace) -> None:
@@ -69,10 +74,9 @@ def put_secret(arguments: argparse.Namespace) -> None:
     s.close()
 
 
-def replace_secret(arguments: argparse.Namespace) -> None:
-    secret = getpass(prompt="Enter the secret: ")
-    s = create_connection(PosixPath(arguments.socket).expanduser())
-    s.send(b"REPLACE " + f"{arguments.vault_id} {secret}".encode("utf-8"))
+def _replace_secret(socket_path: str, vault_id: str, secret: str):
+    s = create_connection(PosixPath(socket_path).expanduser())
+    s.send(b"REPLACE " + f"{vault_id} {secret}".encode("utf-8"))
     answer = s.recv(4096)
     if answer == b"STORED":
         logger.info("Secret stored (or replaced) in agent.")
@@ -83,6 +87,16 @@ def replace_secret(arguments: argparse.Namespace) -> None:
     s.close()
 
 
+def replace_secret(arguments: argparse.Namespace) -> None:
+    secret = getpass(prompt="Enter the secret: ")
+    _replace_secret(arguments.socket, arguments.vault_id, secret)
+
+
+def replace_become_pass(arguments: argparse.Namespace) -> None:
+    secret = getpass(prompt="Enter the password: ")
+    _replace_secret(arguments.socket, BECOME_PASS_ID, secret)
+
+
 def stop_agent(arguments: argparse.Namespace) -> None:
     logger.debug("Asking agent to stop.")
     s = create_connection(PosixPath(arguments.socket).expanduser())
@@ -91,8 +105,8 @@ def stop_agent(arguments: argparse.Namespace) -> None:
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == "--vault-id":
-        # for calls from ansible
+    if len(sys.argv) == 1:
+        # calls from ansible for sudo-password
         stream_handler.setLevel(logging.ERROR)
         s_path = DEFAULT_SOCKET_PATH
         if Path.is_file(PosixPath(CONFIG_LOCATION)):
@@ -100,7 +114,17 @@ if __name__ == '__main__':
             cp.read(CONFIG_LOCATION)
             s_path = cp['DEFAULT']['socket']
         is_socket(s_path)
-        get_secret_ansible(s_path, sys.argv[2])
+        _get_secret(s_path, BECOME_PASS_ID)
+    elif len(sys.argv) == 3 and sys.argv[1] == "--vault-id":
+        # for calls from ansible for vault passphrases
+        stream_handler.setLevel(logging.ERROR)
+        s_path = DEFAULT_SOCKET_PATH
+        if Path.is_file(PosixPath(CONFIG_LOCATION)):
+            cp = configparser.ConfigParser()
+            cp.read(CONFIG_LOCATION)
+            s_path = cp['DEFAULT']['socket']
+        is_socket(s_path)
+        _get_secret(s_path, sys.argv[2])
 
     else:
         # for using from the commandline
@@ -123,6 +147,14 @@ if __name__ == '__main__':
         replace.set_defaults(func=replace_secret)
         exit_cmd = command.add_parser("exit", help="Tell the agent to exit and forget all secrets.")
         exit_cmd.set_defaults(func=stop_agent)
+        become = command.add_parser("become", help="Store/get become-password.")
+        become_commands = become.add_subparsers()
+        become_get = become_commands.add_parser("get", help="Retrieve the become-password.")
+        become_get.set_defaults(func=get_become_pass)
+        become_put = become_commands.add_parser("put",
+                                                help="Store the become-pass. "
+                                                     "Will overwrite a previously stored password.")
+        become_put.set_defaults(func=replace_become_pass)
 
         args = parser.parse_args()
         if args.verbose:
